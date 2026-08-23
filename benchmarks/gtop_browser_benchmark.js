@@ -6,7 +6,27 @@ const RUNS = Number(process.env.RUNS || 5);
 const SETTLE_MS = Number(process.env.SETTLE_MS || 4000);
 
 const BASE = 'https://bioinfo.szbl.ac.cn';
-const HOME = `${BASE}/GTOP/`;
+
+/*
+ * IMPORTANT:
+ * Use the exact same fixed page set for CDN and ORIGIN.
+ * Do not discover benchmark pages dynamically from the homepage, because
+ * discovery itself is affected by the route being benchmarked and can make
+ * the two groups incomparable.
+ *
+ * These pages represent the main GTOP browsing paths:
+ * homepage, expression, QTL, download, and the integrated genome browser.
+ */
+const PAGES = [
+  { name: 'Homepage', url: `${BASE}/GTOP/` },
+  { name: 'Expression', url: `${BASE}/GTOP/expression/` },
+  { name: 'QTL', url: `${BASE}/GTOP/qtl/list?qtl_type=eQTL` },
+  { name: 'Download', url: `${BASE}/GTOP/download/` },
+  {
+    name: 'GenomeBrowser',
+    url: `${BASE}/GTOP/tools/jbrowse/?config=data%2Fconfig.json&loc=chr1%3A196651754-196752476`
+  }
+];
 
 const output = `gtop_browser_${MODE.toLowerCase()}.csv`;
 
@@ -30,61 +50,6 @@ function writeRow(row) {
     output,
     columns.map(c => esc(row[c])).join(',') + '\n'
   );
-}
-
-async function discoverPages(browser) {
-  const context = await browser.newContext();
-  const page = await context.newPage();
-
-  await page.goto(HOME, {
-    waitUntil: 'load',
-    timeout: 60000
-  });
-
-  await page.waitForTimeout(2000);
-
-  const links = await page.locator('a[href]').evaluateAll(nodes =>
-    nodes.map(a => ({
-      text: (a.innerText || a.textContent || '').trim(),
-      href: a.href
-    }))
-  );
-
-  await context.close();
-
-  const wanted = [
-    ['QTL', /\bqtl\b/i],
-    ['Expression', /expression/i],
-    ['Analysis', /analysis/i],
-    ['GenomeBrowser', /genome\s*browser|jbrowse/i]
-  ];
-
-  const pages = [
-    { name: 'Homepage', url: HOME }
-  ];
-
-  for (const [name, re] of wanted) {
-    const hit = links.find(x =>
-      x.href &&
-      x.href.startsWith(BASE) &&
-      (re.test(x.text) || re.test(x.href))
-    );
-
-    if (hit && !pages.some(p => p.url === hit.href)) {
-      pages.push({
-        name,
-        url: hit.href
-      });
-    }
-  }
-
-  console.log('Discovered pages:');
-
-  for (const p of pages) {
-    console.log(`${p.name}: ${p.url}`);
-  }
-
-  return pages;
 }
 
 async function measure(context, item, run, cacheState) {
@@ -121,7 +86,6 @@ async function measure(context, item, run, cacheState) {
 
   cdp.on('Network.requestWillBeSent', e => {
     const url = e.request?.url || '';
-
     if (!/^https?:\/\//.test(url)) return;
 
     requests++;
@@ -145,7 +109,6 @@ async function measure(context, item, run, cacheState) {
 
   cdp.on('Network.loadingFailed', e => {
     const url = urls.get(e.requestId) || '';
-
     if (/^https?:\/\//.test(url)) {
       failedRequests++;
     }
@@ -153,7 +116,6 @@ async function measure(context, item, run, cacheState) {
 
   let status = 0;
   let error = '';
-
   const start = Date.now();
 
   try {
@@ -163,7 +125,6 @@ async function measure(context, item, run, cacheState) {
     });
 
     status = response?.status() || 0;
-
     await page.waitForTimeout(SETTLE_MS);
   } catch (e) {
     error = String(e.message || e)
@@ -172,34 +133,19 @@ async function measure(context, item, run, cacheState) {
   }
 
   const wallTime = Date.now() - start;
-
   let metrics = {};
 
   try {
     metrics = await page.evaluate(() => {
-      const nav =
-        performance.getEntriesByType('navigation')[0];
-
-      const fcp =
-        performance.getEntriesByName(
-          'first-contentful-paint'
-        )[0];
+      const nav = performance.getEntriesByType('navigation')[0];
+      const fcp = performance.getEntriesByName('first-contentful-paint')[0];
 
       return {
-        ttfb_ms:
-          nav ? nav.responseStart - nav.requestStart : null,
-
-        fcp_ms:
-          fcp ? fcp.startTime : null,
-
-        lcp_ms:
-          window.__GTOP_LCP || null,
-
-        domcontentloaded_ms:
-          nav ? nav.domContentLoadedEventEnd : null,
-
-        load_ms:
-          nav ? nav.loadEventEnd : null
+        ttfb_ms: nav ? nav.responseStart - nav.requestStart : null,
+        fcp_ms: fcp ? fcp.startTime : null,
+        lcp_ms: window.__GTOP_LCP || null,
+        domcontentloaded_ms: nav ? nav.domContentLoadedEventEnd : null,
+        load_ms: nav ? nav.loadEventEnd : null
       };
     });
   } catch (_) {}
@@ -227,7 +173,8 @@ async function measure(context, item, run, cacheState) {
     ` | status=${status}` +
     ` | LCP=${metrics.lcp_ms?.toFixed?.(0) ?? 'NA'}ms` +
     ` | Load=${metrics.load_ms?.toFixed?.(0) ?? 'NA'}ms` +
-    ` | GTOP=${(gtopNetworkBytes / 1024 / 1024).toFixed(2)}MB`
+    ` | GTOP=${(gtopNetworkBytes / 1024 / 1024).toFixed(2)}MB` +
+    (error ? ` | ERROR=${error}` : '')
   );
 
   await cdp.detach();
@@ -235,14 +182,22 @@ async function measure(context, item, run, cacheState) {
 }
 
 (async () => {
-  const browser = await chromium.launch({
-    headless: true
-  });
+  console.log(`Benchmark mode: ${MODE}`);
+  console.log(`Runs per page: ${RUNS}`);
+  console.log('Fixed benchmark pages:');
+  for (const p of PAGES) {
+    console.log(`  ${p.name}: ${p.url}`);
+  }
 
-  const pages = await discoverPages(browser);
+  const browser = await chromium.launch({ headless: true });
 
-  for (const item of pages) {
+  for (const item of PAGES) {
     for (let run = 1; run <= RUNS; run++) {
+      /*
+       * A fresh context gives an empty browser cache for the cold load.
+       * The warm load reuses the same context, so HTTP cache/cookies from
+       * the cold load are available.
+       */
       const context = await browser.newContext({
         viewport: {
           width: 1440,
@@ -250,26 +205,14 @@ async function measure(context, item, run, cacheState) {
         }
       });
 
-      await measure(
-        context,
-        item,
-        run,
-        'cold'
-      );
-
-      await measure(
-        context,
-        item,
-        run,
-        'warm'
-      );
+      await measure(context, item, run, 'cold');
+      await measure(context, item, run, 'warm');
 
       await context.close();
     }
   }
 
   await browser.close();
-
   console.log(`Saved ${output}`);
 })().catch(e => {
   console.error(e);
