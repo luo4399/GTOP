@@ -1,0 +1,117 @@
+name: GTOP Browser Benchmark
+
+on:
+  push:
+    branches:
+      - benchmark/site-performance
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          npm install playwright
+          npx playwright install --with-deps chromium
+          python3 -m pip install pandas numpy
+
+      - name: Runner information
+        run: |
+          date -u
+
+          echo "Public IP:"
+          curl -s https://api.ipify.org
+          echo
+
+          echo "DNS:"
+          dig bioinfo.szbl.ac.cn CNAME +short || true
+          dig bioinfo.szbl.ac.cn A +short || true
+
+      - name: Save hosts
+        run: |
+          sudo cp /etc/hosts /tmp/hosts.original
+
+      - name: Verify DCDN
+        run: |
+          HEADERS="$(curl -sS -D - -o /dev/null \
+            https://bioinfo.szbl.ac.cn/GTOP/_nuxt/D0ag_WQM.js)"
+
+          echo "$HEADERS" \
+            | grep -Ei '^(server:|via:|x-cache:|age:)'
+
+          echo "$HEADERS" \
+            | grep -qi '^server: Tengine' || {
+              echo "DCDN route not detected"
+              exit 1
+            }
+
+      - name: Browser benchmark via DCDN
+        env:
+          MODE: CDN
+          RUNS: '5'
+          SETTLE_MS: '4000'
+        run: |
+          node benchmarks/gtop_browser_benchmark.js
+
+      - name: Point hostname to origin
+        run: |
+          sudo cp /tmp/hosts.original /etc/hosts
+          echo "103.170.5.221 bioinfo.szbl.ac.cn" \
+            | sudo tee -a /etc/hosts
+
+          getent hosts bioinfo.szbl.ac.cn
+
+      - name: Verify direct origin
+        run: |
+          HEADERS="$(curl -sS -D - -o /dev/null \
+            https://bioinfo.szbl.ac.cn/GTOP/_nuxt/D0ag_WQM.js)"
+
+          echo "$HEADERS" \
+            | grep -Ei '^(server:|via:|x-cache:|age:)'
+
+          echo "$HEADERS" \
+            | grep -qi '^server: Apache' || {
+              echo "Direct origin not detected"
+              exit 1
+            }
+
+      - name: Browser benchmark direct origin
+        env:
+          MODE: ORIGIN
+          RUNS: '5'
+          SETTLE_MS: '4000'
+        run: |
+          node benchmarks/gtop_browser_benchmark.js
+
+      - name: Analyze results
+        run: |
+          python3 benchmarks/analyze_browser_benchmark.py
+
+      - name: Show comparison
+        run: |
+          cat gtop_browser_comparison.csv
+
+      - name: Restore hosts
+        if: always()
+        run: |
+          sudo cp /tmp/hosts.original /etc/hosts
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gtop-browser-benchmark
+          path: |
+            gtop_browser_cdn.csv
+            gtop_browser_origin.csv
+            gtop_browser_comparison.csv
+            gtop_browser_summary.csv
