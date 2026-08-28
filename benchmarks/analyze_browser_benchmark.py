@@ -87,25 +87,18 @@ if unexpected_pages:
 
 if problems:
     print("\n===== BENCHMARK INCOMPLETE =====\n")
+
     for p in problems:
         print("ERROR:", p)
 
-    fail = df[~valid_mask]
-    if len(fail):
-        print("\n===== FAILED REQUESTS =====\n")
-        print(
-            fail[
-                [
-                    "mode", "page", "run", "cache_state",
-                    "status", "error"
-                ]
-            ].to_string(index=False)
-        )
+    # 找出 HTTP 请求成功，但 FCP/LCP 没有成功采集的运行
+    metric_values = valid[["fcp_ms", "lcp_ms"]].apply(
+        pd.to_numeric,
+        errors="coerce"
+    )
 
-        missing_metrics = valid[
-        valid[["fcp_ms", "lcp_ms"]]
-        .isna()
-        .any(axis=1)
+    missing_metrics = valid[
+        ~np.isfinite(metric_values).all(axis=1)
     ]
 
     if len(missing_metrics):
@@ -125,7 +118,26 @@ if problems:
             ].to_string(index=False)
         )
 
+    fail = df[~valid_mask]
+
+    if len(fail):
+        print("\n===== FAILED REQUESTS =====\n")
+
+        print(
+            fail[
+                [
+                    "mode",
+                    "page",
+                    "run",
+                    "cache_state",
+                    "status",
+                    "error",
+                ]
+            ].to_string(index=False)
+        )
+
     sys.exit(2)
+
 
 metrics = [
     "ttfb_ms",
