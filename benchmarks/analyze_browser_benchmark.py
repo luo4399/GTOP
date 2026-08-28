@@ -43,6 +43,8 @@ valid = df[valid_mask].copy()
 # allowed an incomplete benchmark to look successful.
 problems = []
 
+KEY_METRICS = ["fcp_ms", "lcp_ms"]
+
 for page in EXPECTED_PAGES:
     for state in EXPECTED_STATES:
         for mode in EXPECTED_MODES:
@@ -52,11 +54,30 @@ for page in EXPECTED_PAGES:
                 & (valid["mode"] == mode)
             ]
 
+            # 先检查是否真的有 5 次成功页面请求
             if len(x) != RUNS:
                 problems.append(
                     f"{page}/{state}/{mode}: "
                     f"expected {RUNS} valid runs, found {len(x)}"
                 )
+
+            # 再检查每一次是否真的采集到了 FCP / LCP
+            for metric in KEY_METRICS:
+                values = pd.to_numeric(
+                    x[metric],
+                    errors="coerce"
+                )
+
+                n_valid = np.isfinite(
+                    values.to_numpy()
+                ).sum()
+
+                if n_valid != RUNS:
+                    problems.append(
+                        f"{page}/{state}/{mode}/{metric}: "
+                        f"expected {RUNS} valid values, found {n_valid}"
+                    )
+
 
 unexpected_pages = sorted(set(valid["page"]) - set(EXPECTED_PAGES))
 if unexpected_pages:
@@ -77,6 +98,29 @@ if problems:
                 [
                     "mode", "page", "run", "cache_state",
                     "status", "error"
+                ]
+            ].to_string(index=False)
+        )
+
+        missing_metrics = valid[
+        valid[["fcp_ms", "lcp_ms"]]
+        .isna()
+        .any(axis=1)
+    ]
+
+    if len(missing_metrics):
+        print("\n===== MISSING FCP/LCP =====\n")
+
+        print(
+            missing_metrics[
+                [
+                    "mode",
+                    "page",
+                    "run",
+                    "cache_state",
+                    "status",
+                    "fcp_ms",
+                    "lcp_ms",
                 ]
             ].to_string(index=False)
         )
